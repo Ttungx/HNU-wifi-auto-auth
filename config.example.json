@@ -1,0 +1,16 @@
+{
+  "username": "240xxxxxxx",
+  "password": "your_password_here",
+  "operator": "lt",
+  "portal_host": "10.101.2.194",
+  "portal_port": 6060,
+  "wlanacname": "HSD-BRAS-2",
+  "user_status_api": "http://10.101.2.239/clean-mac/ext/online/user/getUserByRequestIp",
+  "offline_operator_api": "http://10.101.2.205:8081/ext/offline-operator",
+  "school_code": "3def184ad8f4755ff269862ea77393dd",
+  "auto_kick_device": true,
+  "check_interval_seconds": 60,
+  "max_retries": 3,
+  "retry_delay_seconds": 3,
+  "timeout_seconds": 5
+}

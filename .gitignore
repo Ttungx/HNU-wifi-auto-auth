@@ -1,0 +1,19 @@
+# Configuration files with credentials
+config.json
+.env
+*.local.json
+
+# Logs
+*.log
+logs/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Temporary files
+temp_*
+*.tmp
+*.har
