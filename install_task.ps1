@@ -1,4 +1,4 @@
-﻿# 校园网自动认证安装脚本
+﻿# 校园网自动认证 (CampusWiFiAutoAuth) 安装脚本 - 纯 PowerShell 版
 $ErrorActionPreference = 'Stop'
 
 Write-Host "===================================================" -ForegroundColor Cyan
@@ -11,7 +11,7 @@ if (-not $workDir) {
     $workDir = (Get-Location).Path
 }
 
-# 1. 直接使用 Windows 自带的 powershell.exe
+# 1. 直接使用 Windows 自带的 powershell.exe (无需任何 Python 环境)
 $psExe = "powershell.exe"
 $psScript = "portal_auth.ps1"
 $fullScriptPath = Join-Path $workDir $psScript
@@ -57,7 +57,10 @@ Write-Host "[+] 电池策略已生效: 已解除电源限制，无论是否接�
 # 6. 自检测试运行
 Write-Host "[*] 正在执行任务自检..." -ForegroundColor Gray
 Start-ScheduledTask -TaskName 'CampusWiFiAutoAuth'
-Start-Sleep -Seconds 2
+for ($i = 0; $i -lt 5; $i++) {
+    Start-Sleep -Seconds 1
+    if ((Get-ScheduledTask -TaskName 'CampusWiFiAutoAuth').State -ne 'Running') { break }
+}
 $res = (Get-ScheduledTaskInfo -TaskName 'CampusWiFiAutoAuth').LastTaskResult
 
 if ($res -eq 0) {
