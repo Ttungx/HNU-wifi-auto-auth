@@ -1,5 +1,5 @@
 ﻿# -*- coding: utf-8 -*-
-# 校园网自动认证 (纯 PowerShell 核心版)
+# 校园网自动认证 (纯 PowerShell 核心版，带静默文件日志)
 param(
     [string]$Username,
     [string]$Password,
@@ -13,6 +13,21 @@ $STATUS_URL = "http://10.101.2.239/clean-mac/ext/online/user/getUserByRequestIp"
 $OFFLINE_URL = "http://10.101.2.205:8081/ext/offline-operator"
 $SCHOOL_CODE = "3def184ad8f4755ff269862ea77393dd"
 $SUFFIX_MAP = @{ "lt" = "@lt"; "yd" = "@yd"; "dx" = "@dx"; "jzg" = "@hsd"; "xnzy" = "@hsd" }
+
+$workDir = $PSScriptRoot
+if (-not $workDir) { $workDir = (Get-Location).Path }
+$logFile = Join-Path $workDir "portal_auth.log"
+
+function Write-Log([string]$msg, [string]$color = "Gray") {
+    $time = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+    Write-Host $msg -ForegroundColor $color
+    try {
+        if ((Test-Path $logFile) -and ((Get-Item $logFile).Length -gt 256KB)) {
+            Clear-Content -Path $logFile -ErrorAction SilentlyContinue
+        }
+        "[$time] $msg" | Out-File -FilePath $logFile -Append -Encoding utf8 -ErrorAction SilentlyContinue
+    } catch {}
+}
 
 # 1. 检查连网状态
 function Test-IsOnline {
@@ -64,25 +79,29 @@ function Invoke-KickDevice($userId, $pwd) {
 # 5. 主认证逻辑
 function Start-CampusLogin($user, $pwd, $op) {
     if (Test-IsOnline) {
-        Write-Host "[+] 网络已在线，跳过认证。" -ForegroundColor Green
+        Write-Log "[+] 网络已在线，跳过认证。" "Green"
         return $true
     }
 
     $suffix = if ($SUFFIX_MAP.ContainsKey($op.ToLower())) { $SUFFIX_MAP[$op.ToLower()] } else { "@lt" }
     $fullUser = if ($user -match "@") { $user } else { "$user$suffix" }
     $maskedUser = if ($fullUser.Length -gt 8) { $fullUser.Substring(0, 3) + "****" + $fullUser.Substring($fullUser.Length - 5) } else { "***" }
-    Write-Host "[*] 开始认证账号: $maskedUser" -ForegroundColor Cyan
+    Write-Log "[*] 开始认证账号: $maskedUser" "Cyan"
 
     $ip = Get-LocalIp
     $mac = Get-LocalMac
     $acname = "HSD-BRAS-2"
+
+    Write-Log "[*] 探测参数: IP=$ip, MAC=$mac, AC=$acname" "Gray"
 
     # 获取网关动态会话参数
     $session = $null
     try {
         $sessionUrl = "http://${HOST_IP}:${PORT}/PortalJsonAction.do?wlanuserip=$ip&wlanacname=$acname&mac=$mac&viewStatus=1"
         $session = Invoke-RestMethod -Uri $sessionUrl -TimeoutSec 3 -UseBasicParsing -ErrorAction Stop
-    } catch {}
+    } catch {
+        Write-Log "[!] 获取网关 PortalJsonAction 异常: $_" "Yellow"
+    }
 
     $pc = if ($session) { $session.portalconfig } else { $null }
     $sf = if ($session) { $session.serverForm } else { $null }
@@ -126,20 +145,21 @@ function Start-CampusLogin($user, $pwd, $op) {
             $msg = "$($res.message)"
 
             if ($code -eq "0") {
-                Write-Host "[+] 认证成功！已连通互联网。" -ForegroundColor Green
+                Write-Log "[+] 认证成功！已连通互联网。" "Green"
                 return $true
             }
 
-            Write-Host "[-] 认证失败 (code=$code): $msg" -ForegroundColor Yellow
+            Write-Log "[-] 认证失败 (code=$code): $msg" "Yellow"
             if (($msg -match "21" -or $msg -match "Limit") -and (Invoke-KickDevice $fullUser $pwd)) {
-                Write-Host "[*] 已踢下线旧设备，正在重试..." -ForegroundColor Gray
+                Write-Log "[*] 已踢下线旧设备，正在重试..." "Gray"
                 continue
             }
             if ($msg -match "密码" -or $msg -match "不存在" -or $msg -match "余额") {
+                Write-Log "[-] 账号或凭据异常，终止重试: $msg" "Red"
                 return $false
             }
         } catch {
-            Write-Host "[!] 请求异常: $_" -ForegroundColor Red
+            Write-Log "[!] 认证请求异常: $_" "Red"
         }
         Start-Sleep -Seconds 2
     }
@@ -147,8 +167,6 @@ function Start-CampusLogin($user, $pwd, $op) {
 }
 
 # 入口分流
-$workDir = $PSScriptRoot
-if (-not $workDir) { $workDir = (Get-Location).Path }
 $configPath = Join-Path $workDir "config.json"
 
 if (-not $Username -and (Test-Path $configPath)) {
@@ -157,16 +175,17 @@ if (-not $Username -and (Test-Path $configPath)) {
         $Username = $cfg.username
         $Password = $cfg.password
         if ($cfg.operator) { $Operator = $cfg.operator }
-    } catch {}
+    } catch {
+        Write-Log "[-] 读取 config.json 失败: $_" "Red"
+    }
 }
 
 if (-not $Username -or -not $Password) {
     if (Test-IsOnline) {
-        Write-Host "[+] 当前设备已在线，无需认证。" -ForegroundColor Green
+        Write-Log "[+] 当前设备已在线，无需认证。" "Green"
         exit 0
     }
-    Write-Host "用法: .\portal_auth.ps1 -Username <学号> -Password <密码> [-Operator lt/yd/dx]" -ForegroundColor Yellow
-    Write-Host "或在 config.json 中配置 username 与 password 后直接运行。" -ForegroundColor Yellow
+    Write-Log "[-] 错误: 未配置账号或密码，请检查 config.json 是否填写正确。" "Red"
     exit 1
 }
 
