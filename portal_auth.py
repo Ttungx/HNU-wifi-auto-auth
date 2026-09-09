@@ -1,8 +1,23 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""校园网自动认证实现"""
+"""
+校园网自动认证 (纯 Python 核心版)
+针对安冉云 AuteWiFi (HSD-BRAS-2 / Ace Admin Portal)
 
-import json, os, socket, sys, time, urllib.parse, urllib.request, uuid
+- 零第三方依赖 (纯标准库)
+- 双重在线状态检查 (已在线则 0.05 秒跳过，绝不重复登录或误踢设备)
+- 动态参数解析与后踢前 (设备达上限时自动踢旧设备并重试)
+- 运行日志自动写入同目录 portal_auth.log (自动限容 256KB)
+"""
+
+import json
+import os
+import socket
+import sys
+import time
+import urllib.parse
+import urllib.request
+import uuid
 
 HOST, PORT = "10.101.2.194", 6060
 STATUS_URL = "http://10.101.2.239/clean-mac/ext/online/user/getUserByRequestIp"
@@ -10,18 +25,37 @@ OFFLINE_URL = "http://10.101.2.205:8081/ext/offline-operator"
 SCHOOL_CODE = "3def184ad8f4755ff269862ea77393dd"
 SUFFIX_MAP = {"lt": "@lt", "yd": "@yd", "dx": "@dx", "jzg": "@hsd", "xnzy": "@hsd"}
 
+WORK_DIR = os.path.dirname(os.path.abspath(__file__))
+LOG_FILE = os.path.join(WORK_DIR, "portal_auth.log")
+
+
+def log(msg: str) -> None:
+    now_str = time.strftime("%Y-%m-%d %H:%M:%S")
+    formatted = f"[{now_str}] {msg}"
+    print(msg)
+    try:
+        if os.path.exists(LOG_FILE) and os.path.getsize(LOG_FILE) > 256 * 1024:
+            with open(LOG_FILE, "w", encoding="utf-8") as f:
+                f.write("")
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(formatted + "\n")
+    except Exception:
+        pass
+
 
 def is_online() -> bool:
-    """检测是否已认证连网 (优先内网用户接口，兜底 Captive 探针)"""
+    """检测是否已连网 (优先内网用户接口，兜底 Captive 探针)"""
     try:
-        with urllib.request.urlopen(STATUS_URL, timeout=2) as r:
+        req = urllib.request.Request(STATUS_URL, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=2) as r:
             data = json.loads(r.read().decode("utf-8", "ignore"))
             if data.get("code") == 1 and data.get("data", {}).get("userId"):
                 return True
     except Exception:
         pass
     try:
-        with urllib.request.urlopen("http://captive.apple.com/hotspot-detect.html", timeout=2) as r:
+        req = urllib.request.Request("http://captive.apple.com/hotspot-detect.html", headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=2) as r:
             return r.status == 200 and b"Success" in r.read()
     except Exception:
         return False
@@ -66,10 +100,11 @@ def sniff_redirect() -> dict:
 
 
 def kick_device(userid: str, passwd: str) -> bool:
-    """设备超限时踢下线最旧设备"""
+    """设备超限时踢下线最旧设备 (后踢前)"""
     try:
         data = urllib.parse.urlencode({"schoolCode": SCHOOL_CODE, "userId": userid, "password": passwd}).encode()
-        urllib.request.urlopen(OFFLINE_URL, data=data, timeout=3)
+        req = urllib.request.Request(OFFLINE_URL, data=data, headers={"User-Agent": "Mozilla/5.0"})
+        urllib.request.urlopen(req, timeout=3)
         time.sleep(2.5)
         return True
     except Exception:
@@ -78,12 +113,12 @@ def kick_device(userid: str, passwd: str) -> bool:
 
 def login(user: str, passwd: str, op: str = "lt", retries: int = 3) -> bool:
     if is_online():
-        print("[+] 网络已在线，跳过认证。")
+        log("[+] 网络已在线，跳过认证。")
         return True
 
     full_user = user if "@" in user else f"{user}{SUFFIX_MAP.get(op.lower(), '@lt')}"
     masked_user = full_user[:3] + "****" + full_user[-5:] if len(full_user) > 8 else "***"
-    print(f"[*] 开始认证账号: {masked_user}")
+    log(f"[*] 开始认证账号: {masked_user}")
 
     sniffed = sniff_redirect()
     host = sniffed.get("_host", HOST)
@@ -92,14 +127,17 @@ def login(user: str, passwd: str, op: str = "lt", retries: int = 3) -> bool:
     mac = sniffed.get("mac") or get_local_mac()
     acname = sniffed.get("wlanacname", "HSD-BRAS-2")
 
+    log(f"[*] 探测参数: IP={ip}, MAC={mac}, AC={acname}")
+
     # 获取网关会话参数
     session = {}
     try:
         q = urllib.parse.urlencode({"wlanuserip": ip, "wlanacname": acname, "mac": mac, "viewStatus": "1"})
-        with urllib.request.urlopen(f"http://{host}:{port}/PortalJsonAction.do?{q}", timeout=3) as r:
+        req = urllib.request.Request(f"http://{host}:{port}/PortalJsonAction.do?{q}", headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=3) as r:
             session = json.loads(r.read().decode("utf-8", "ignore"))
-    except Exception:
-        pass
+    except Exception as e:
+        log(f"[!] 获取 PortalJsonAction 异常: {e}")
 
     pc = session.get("portalconfig") or {}
     sf = session.get("serverForm") or {}
@@ -134,17 +172,18 @@ def login(user: str, passwd: str, op: str = "lt", retries: int = 3) -> bool:
 
             code, msg = str(res.get("code")), res.get("message", "")
             if code == "0":
-                print("[+] 认证成功！已连通互联网。")
+                log("[+] 认证成功！已连通互联网。")
                 return True
 
-            print(f"[-] 认证失败 (code={code}): {msg}")
+            log(f"[-] 认证失败 (code={code}): {msg}")
             if ("21" in msg or "Limit" in msg) and kick_device(full_user, passwd):
-                print("[*] 已踢下线旧设备，正在重试...")
+                log("[*] 已踢下线旧设备，正在重试...")
                 continue
             if any(k in msg for k in ["密码", "不存在", "余额"]):
+                log(f"[-] 凭据或账号异常，终止重试: {msg}")
                 return False
         except Exception as e:
-            print(f"[!] 请求异常: {e}")
+            log(f"[!] 认证请求异常: {e}")
         time.sleep(2)
 
     return False
@@ -152,24 +191,25 @@ def login(user: str, passwd: str, op: str = "lt", retries: int = 3) -> bool:
 
 def main():
     cfg = {}
-    if os.path.exists("config.json"):
+    config_path = os.path.join(WORK_DIR, "config.json")
+    if os.path.exists(config_path):
         try:
-            with open("config.json", encoding="utf-8") as f:
+            with open(config_path, encoding="utf-8") as f:
                 cfg = json.load(f)
-        except Exception:
-            pass
+        except Exception as e:
+            log(f"[-] 读取 config.json 失败: {e}")
 
-    # 支持命令行参数优先: python portal_auth.py [学号] [密码] [运营商: lt/yd/dx]
     user = sys.argv[1] if len(sys.argv) > 1 else cfg.get("username")
     passwd = sys.argv[2] if len(sys.argv) > 2 else cfg.get("password")
     op = sys.argv[3] if len(sys.argv) > 3 else cfg.get("operator", "lt")
 
     if not user or not passwd:
         if is_online():
-            print("[+] 当前设备已在线，无需认证。")
+            log("[+] 当前设备已在线，无需认证。")
             sys.exit(0)
-        print("用法: python portal_auth.py [学号] [密码] [运营商: lt/yd/dx]")
-        print("或者在 config.json 中配置 username 与 password 后直接运行。")
+        log("[-] 错误: 未配置账号或密码。")
+        log("    用法: python portal_auth.py [学号] [密码] [运营商: lt/yd/dx]")
+        log("    或者在 config.json 中配置 username 与 password 后直接运行。")
         sys.exit(1)
 
     sys.exit(0 if login(user, passwd, op) else 1)
