@@ -44,25 +44,25 @@ def log(msg: str) -> None:
 
 
 def is_online() -> bool:
-    """检测是否已连网 (优先内网用户接口，兜底 Captive 探针)"""
+    """检测是否已连网 (优先内网用户接口，离线快速返回)"""
     try:
         req = urllib.request.Request(STATUS_URL, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=2) as r:
+        with urllib.request.urlopen(req, timeout=1.5) as r:
             data = json.loads(r.read().decode("utf-8", "ignore"))
-            if data.get("code") == 1 and data.get("data", {}).get("userId"):
-                return True
+            if data.get("code") == 1:
+                return bool(data.get("data", {}).get("userId"))
     except Exception:
         pass
     try:
         req = urllib.request.Request("http://captive.apple.com/hotspot-detect.html", headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=2) as r:
+        with urllib.request.urlopen(req, timeout=1.5) as r:
             return r.status == 200 and b"Success" in r.read()
     except Exception:
         return False
 
 
 def get_local_ip() -> str:
-    for _ in range(5):
+    for _ in range(15):
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
                 s.connect((HOST, PORT))
@@ -71,7 +71,7 @@ def get_local_ip() -> str:
                     return ip
         except Exception:
             pass
-        time.sleep(1)
+        time.sleep(0.2)
     return socket.gethostbyname(socket.gethostname())
 
 
@@ -116,24 +116,27 @@ def login(user: str, passwd: str, op: str = "lt", retries: int = 3) -> bool:
         log("[+] 网络已在线，跳过认证。")
         return True
 
-    sniffed = sniff_redirect()
-    host = sniffed.get("_host", HOST)
-    port = sniffed.get("_port", PORT)
-    ip = sniffed.get("wlanuserip") or get_local_ip()
-    mac = sniffed.get("mac") or get_local_mac()
-    acname = sniffed.get("wlanacname", "HSD-BRAS-2")
+    host, port, acname = HOST, PORT, "HSD-BRAS-2"
+    ip = get_local_ip()
+    mac = get_local_mac()
 
     log(f"[*] 探测参数: IP={ip}, MAC={mac}, AC={acname}")
 
-    # 获取网关会话参数
+    # 优先直接获取网关会话参数 (内网直连 ~20ms)
     session = {}
+    vlan = ""
     try:
         q = urllib.parse.urlencode({"wlanuserip": ip, "wlanacname": acname, "mac": mac, "viewStatus": "1"})
         req = urllib.request.Request(f"http://{host}:{port}/PortalJsonAction.do?{q}", headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=3) as r:
+        with urllib.request.urlopen(req, timeout=1.5) as r:
             session = json.loads(r.read().decode("utf-8", "ignore"))
     except Exception as e:
-        log(f"[!] 获取 PortalJsonAction 异常: {e}")
+        log(f"[!] 直连网关异常，尝试嗅探重定向: {e}")
+        sniffed = sniff_redirect()
+        host = sniffed.get("_host", host)
+        port = sniffed.get("_port", port)
+        acname = sniffed.get("wlanacname", acname)
+        vlan = sniffed.get("vlan", "")
 
     pc = session.get("portalconfig") or {}
     sf = session.get("serverForm") or {}
@@ -160,7 +163,7 @@ def login(user: str, passwd: str, op: str = "lt", retries: int = 3) -> bool:
         "wlanacname": acname,
         "wlanacIp": sf.get("serverip", ""),
         "ssid": "",
-        "vlan": pf.get("vlan") or sniffed.get("vlan", ""),
+        "vlan": pf.get("vlan") or vlan,
         "mac": mac,
         "version": str(sf.get("portalVer", 0)),
         "portalpageid": str(pc.get("id", 46)),
