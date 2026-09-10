@@ -22,10 +22,23 @@ class TestCorePortalAuth(unittest.TestCase):
 
     @patch("portal_auth.is_online", return_value=False)
     @patch("urllib.request.urlopen")
-    def test_login_success(self, mock_urlopen, _):
-        # 依次返回 PortalJsonAction.do 和 quickauth.do 模拟响应
+    def test_login_success_dorm(self, mock_urlopen, _):
+        # 宿舍区：id=46，使用运营商后缀 @lt
         r_session = MagicMock()
-        r_session.read.return_value = json.dumps({"portalconfig": {"id": 46, "uuid": "u1", "timestamp": 123}}).encode()
+        r_session.read.return_value = json.dumps({"portalconfig": {"id": 46, "tname": "hsd_dq_mobile_portal_skin-2", "uuid": "u1", "timestamp": 123}}).encode()
+
+        r_auth = MagicMock()
+        r_auth.read.return_value = json.dumps({"code": "0", "message": "success"}).encode()
+
+        mock_urlopen.return_value.__enter__.side_effect = [r_session, r_auth]
+        self.assertTrue(portal_auth.login("20240001", "correct_pwd", "lt", retries=1))
+
+    @patch("portal_auth.is_online", return_value=False)
+    @patch("urllib.request.urlopen")
+    def test_login_success_teaching_building(self, mock_urlopen, _):
+        # 教学区：id=82 / tname="hsd-jxq-h5_noTec"，自动识别为教学区走 @htu 后缀
+        r_session = MagicMock()
+        r_session.read.return_value = json.dumps({"portalconfig": {"id": 82, "tname": "hsd-jxq-h5_noTec", "uuid": "u2", "timestamp": 456}}).encode()
 
         r_auth = MagicMock()
         r_auth.read.return_value = json.dumps({"code": "0", "message": "success"}).encode()

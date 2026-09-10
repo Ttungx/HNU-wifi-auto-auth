@@ -48,7 +48,7 @@ def main():
   <Triggers>
     <EventTrigger>
       <Enabled>true</Enabled>
-      <Subscription>&lt;QueryList&gt;&lt;Query Id="0" Path="Microsoft-Windows-WLAN-AutoConfig/Operational"&gt;&lt;Select Path="Microsoft-Windows-WLAN-AutoConfig/Operational"&gt;*[System[(EventID=8001)]] and *[EventData[Data[@Name='SSID']='Htu-AuteWiFi' or Data[@Name='SSID']='autewifi' or Data[@Name='SSID']='AuteWiFi' or Data[@Name='SSID']='Htu-AuteWiFi5G-18' or Data[@Name='SSID']='Htu-AuteWiFi5G-17']]&lt;/Select&gt;&lt;/Query&gt;&lt;/QueryList&gt;</Subscription>
+      <Subscription>&lt;QueryList&gt;&lt;Query Id="0" Path="Microsoft-Windows-WLAN-AutoConfig/Operational"&gt;&lt;Select Path="Microsoft-Windows-WLAN-AutoConfig/Operational"&gt;*[System[(EventID=8001)]] and *[EventData[Data[@Name='SSID']='Htu-AuteWiFi' or Data[@Name='SSID']='autewifi' or Data[@Name='SSID']='AuteWiFi' or Data[@Name='SSID']='Htu-AuteWiFi5G-18' or Data[@Name='SSID']='Htu-AuteWiFi5G-17' or Data[@Name='SSID']='HTU_Student' or Data[@Name='SSID']='HTU_Teacher']]&lt;/Select&gt;&lt;/Query&gt;&lt;/QueryList&gt;</Subscription>
       <Delay>PT2S</Delay>
     </EventTrigger>
   </Triggers>
@@ -96,7 +96,7 @@ def main():
 
         print()
         print("===================================================")
-        print("安装完成！以后当电脑连接宿舍 Wi-Fi 时将全自动完成认证。")
+        print("安装完成！以后当电脑连接宿舍或教学楼 Wi-Fi 时将全自动完成认证。")
         print("===================================================")
 
     finally:

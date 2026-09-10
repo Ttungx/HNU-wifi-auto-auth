@@ -23,7 +23,7 @@ HOST, PORT = "10.101.2.194", 6060
 STATUS_URL = "http://10.101.2.239/clean-mac/ext/online/user/getUserByRequestIp"
 OFFLINE_URL = "http://10.101.2.205:8081/ext/offline-operator"
 SCHOOL_CODE = "3def184ad8f4755ff269862ea77393dd"
-SUFFIX_MAP = {"lt": "@lt", "yd": "@yd", "dx": "@dx", "jzg": "@hsd", "xnzy": "@hsd"}
+SUFFIX_MAP = {"lt": "@lt", "yd": "@yd", "dx": "@dx", "jzg": "@hsd", "xnzy": "@hsd", "htu": "@htu"}
 
 WORK_DIR = os.path.dirname(os.path.abspath(__file__))
 LOG_FILE = os.path.join(WORK_DIR, "portal_auth.log")
@@ -116,10 +116,6 @@ def login(user: str, passwd: str, op: str = "lt", retries: int = 3) -> bool:
         log("[+] 网络已在线，跳过认证。")
         return True
 
-    full_user = user if "@" in user else f"{user}{SUFFIX_MAP.get(op.lower(), '@lt')}"
-    masked_user = full_user[:3] + "****" + full_user[-5:] if len(full_user) > 8 else "***"
-    log(f"[*] 开始认证账号: {masked_user}")
-
     sniffed = sniff_redirect()
     host = sniffed.get("_host", HOST)
     port = sniffed.get("_port", PORT)
@@ -142,6 +138,19 @@ def login(user: str, passwd: str, op: str = "lt", retries: int = 3) -> bool:
     pc = session.get("portalconfig") or {}
     sf = session.get("serverForm") or {}
     pf = session.get("portalForm") or {}
+
+    # 自动识别区域 (教学区 hsd-jxq / 宿舍区 hsd_dq)
+    is_jxq = "jxq" in pc.get("tname", "") or str(pc.get("id")) == "82"
+    if "@" in user:
+        full_user = user
+    elif is_jxq:
+        full_user = f"{user}@htu.edu.cn" if op.lower() == "jzg" else f"{user}@htu"
+    else:
+        full_user = f"{user}{SUFFIX_MAP.get(op.lower(), '@lt')}"
+
+    masked_user = full_user[:3] + "****" + full_user[-5:] if len(full_user) > 8 else "***"
+    area_name = "教学区" if is_jxq else "宿舍区"
+    log(f"[*] 开始认证账号: {masked_user} ({area_name})")
 
     params = {
         "userid": full_user,
