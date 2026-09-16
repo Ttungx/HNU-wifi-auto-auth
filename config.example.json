@@ -11,6 +11,7 @@
   "auto_kick_device": true,
   "check_interval_seconds": 60,
   "max_retries": 3,
-  "retry_delay_seconds": 3,
+  "retry_delay_seconds": 1,
+  "auth_window_seconds": 150,
   "timeout_seconds": 5
 }

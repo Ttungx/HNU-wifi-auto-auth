@@ -5,7 +5,9 @@
 针对安冉云 AuteWiFi (HSD-BRAS-2 / Ace Admin Portal)
 
 - 零第三方依赖 (纯标准库)
-- 双重在线状态检查 (已在线则 0.05 秒跳过，绝不重复登录或误踢设备)
+- 开机/唤醒竞态自愈: 先等 DHCP 就绪, 就绪前不空转, 总窗口内自动重试
+- 快速在线检查: 内网接口可达时一次请求即判定, 已在线毫秒级跳过
+- 非校园网环境 (非 10.x 网段) 自动安静退出, 不干扰外网/热点使用
 - 动态参数解析与后踢前 (设备达上限时自动踢旧设备并重试)
 - 运行日志自动写入同目录 portal_auth.log (自动限容 256KB)
 """
@@ -24,6 +26,10 @@ STATUS_URL = "http://10.101.2.239/clean-mac/ext/online/user/getUserByRequestIp"
 OFFLINE_URL = "http://10.101.2.205:8081/ext/offline-operator"
 SCHOOL_CODE = "3def184ad8f4755ff269862ea77393dd"
 SUFFIX_MAP = {"lt": "@lt", "yd": "@yd", "dx": "@dx", "jzg": "@hsd", "xnzy": "@hsd", "htu": "@htu"}
+CAMPUS_PREFIXES = ("10.",)
+AUTH_WINDOW = 150
+PROBE_INTERVAL = 0.25
+RETRY_INTERVAL = 1.0
 
 WORK_DIR = os.path.dirname(os.path.abspath(__file__))
 LOG_FILE = os.path.join(WORK_DIR, "portal_auth.log")
@@ -44,35 +50,36 @@ def log(msg: str) -> None:
 
 
 def is_online() -> bool:
-    """检测是否已连网 (优先内网用户接口，离线快速返回)"""
+    """检测是否已连网 (内网接口可达时以其返回为准，一次请求即判定)"""
     try:
         req = urllib.request.Request(STATUS_URL, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=1.5) as r:
+        with urllib.request.urlopen(req, timeout=1.2) as r:
             data = json.loads(r.read().decode("utf-8", "ignore"))
-            if data.get("code") == 1:
-                return bool(data.get("data", {}).get("userId"))
+        d = data.get("data")
+        return isinstance(d, dict) and bool(d.get("userId"))
     except Exception:
         pass
     try:
         req = urllib.request.Request("http://captive.apple.com/hotspot-detect.html", headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=1.5) as r:
+        with urllib.request.urlopen(req, timeout=1.2) as r:
             return r.status == 200 and b"Success" in r.read()
     except Exception:
         return False
 
 
-def get_local_ip() -> str:
-    for _ in range(15):
+def wait_for_ip(deadline: float):
+    """等待 DHCP 分配有效 IP, 超时返回 None"""
+    while time.monotonic() < deadline:
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
                 s.connect((HOST, PORT))
                 ip = s.getsockname()[0]
-                if not ip.startswith("169.254") and ip != "127.0.0.1":
-                    return ip
-        except Exception:
+            if ip and not ip.startswith(("127.", "169.254")):
+                return ip
+        except OSError:
             pass
-        time.sleep(0.2)
-    return socket.gethostbyname(socket.gethostname())
+        time.sleep(PROBE_INTERVAL)
+    return None
 
 
 def get_local_mac() -> str:
@@ -99,6 +106,22 @@ def sniff_redirect() -> dict:
     return {}
 
 
+def fetch_session(ip: str, mac: str, verbose: bool = False):
+    """获取网关会话参数，失败时回退嗅探重定向。返回 (session, host, port, acname, vlan) 或 None"""
+    try:
+        q = urllib.parse.urlencode({"wlanuserip": ip, "wlanacname": "HSD-BRAS-2", "mac": mac, "viewStatus": "1"})
+        req = urllib.request.Request(f"http://{HOST}:{PORT}/PortalJsonAction.do?{q}", headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=1.5) as r:
+            return json.loads(r.read().decode("utf-8", "ignore")), HOST, PORT, "HSD-BRAS-2", ""
+    except Exception as e:
+        if verbose:
+            log(f"[!] 直连网关异常，尝试嗅探重定向: {e}")
+    sniffed = sniff_redirect()
+    if sniffed:
+        return {}, sniffed.get("_host", HOST), sniffed.get("_port", PORT), sniffed.get("wlanacname", "HSD-BRAS-2"), sniffed.get("vlan", "")
+    return None
+
+
 def kick_device(userid: str, passwd: str) -> bool:
     """设备超限时踢下线最旧设备 (后踢前)"""
     try:
@@ -111,32 +134,41 @@ def kick_device(userid: str, passwd: str) -> bool:
         return False
 
 
-def login(user: str, passwd: str, op: str = "lt", retries: int = 3) -> bool:
+def login(user: str, passwd: str, op: str = "lt", retries: int = 3, window: float = AUTH_WINDOW,
+          retry_delay: float = RETRY_INTERVAL) -> bool:
+    t0 = time.monotonic()
+    deadline = t0 + window
+
+    ip = wait_for_ip(deadline)
+    if ip is None:
+        log(f"[!] 等待网络就绪超时 ({window:.0f}s)，本次跳过，等待计划任务重试。")
+        return False
+    if not ip.startswith(CAMPUS_PREFIXES):
+        log(f"[*] 非校园网环境 (IP={ip})，跳过认证。")
+        return True
+    if time.monotonic() - t0 > 1:
+        log(f"[*] 网络就绪耗时 {time.monotonic() - t0:.1f}s (IP={ip})")
+
     if is_online():
         log("[+] 网络已在线，跳过认证。")
         return True
 
-    host, port, acname = HOST, PORT, "HSD-BRAS-2"
-    ip = get_local_ip()
     mac = get_local_mac()
+    log(f"[*] 探测参数: IP={ip}, MAC={mac}, AC=HSD-BRAS-2")
 
-    log(f"[*] 探测参数: IP={ip}, MAC={mac}, AC={acname}")
-
-    # 优先直接获取网关会话参数 (内网直连 ~20ms)
-    session = {}
-    vlan = ""
-    try:
-        q = urllib.parse.urlencode({"wlanuserip": ip, "wlanacname": acname, "mac": mac, "viewStatus": "1"})
-        req = urllib.request.Request(f"http://{host}:{port}/PortalJsonAction.do?{q}", headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=1.5) as r:
-            session = json.loads(r.read().decode("utf-8", "ignore"))
-    except Exception as e:
-        log(f"[!] 直连网关异常，尝试嗅探重定向: {e}")
-        sniffed = sniff_redirect()
-        host = sniffed.get("_host", host)
-        port = sniffed.get("_port", port)
-        acname = sniffed.get("wlanacname", acname)
-        vlan = sniffed.get("vlan", "")
+    session = None
+    host, port, acname, vlan = HOST, PORT, "HSD-BRAS-2", ""
+    first = True
+    while session is None and time.monotonic() < deadline:
+        got = fetch_session(ip, mac, verbose=first)
+        first = False
+        if got is not None:
+            session, host, port, acname, vlan = got
+            break
+        time.sleep(RETRY_INTERVAL)
+    if session is None:
+        log("[!] 无法获取网关会话参数，本次跳过，等待计划任务重试。")
+        return False
 
     pc = session.get("portalconfig") or {}
     sf = session.get("serverForm") or {}
@@ -179,12 +211,12 @@ def login(user: str, passwd: str, op: str = "lt", retries: int = 3) -> bool:
         try:
             url = f"http://{host}:{port}/quickauth.do?{urllib.parse.urlencode(params)}"
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=4) as r:
+            with urllib.request.urlopen(req, timeout=3) as r:
                 res = json.loads(r.read().decode("utf-8", "ignore"))
 
             code, msg = str(res.get("code")), res.get("message", "")
             if code == "0":
-                log("[+] 认证成功！已连通互联网。")
+                log(f"[+] 认证成功！总耗时 {time.monotonic() - t0:.2f}s")
                 return True
 
             log(f"[-] 认证失败 (code={code}): {msg}")
@@ -196,7 +228,8 @@ def login(user: str, passwd: str, op: str = "lt", retries: int = 3) -> bool:
                 return False
         except Exception as e:
             log(f"[!] 认证请求异常: {e}")
-        time.sleep(2)
+        if attempt < retries:
+            time.sleep(retry_delay)
 
     return False
 
@@ -224,7 +257,11 @@ def main():
         log("    或者在 config.json 中配置 username 与 password 后直接运行。")
         sys.exit(1)
 
-    sys.exit(0 if login(user, passwd, op) else 1)
+    ok = login(user, passwd, op,
+               retries=int(cfg.get("max_retries", 3)),
+               window=float(cfg.get("auth_window_seconds", AUTH_WINDOW)),
+               retry_delay=float(cfg.get("retry_delay_seconds", RETRY_INTERVAL)))
+    sys.exit(0 if ok else 1)
 
 
 if __name__ == "__main__":

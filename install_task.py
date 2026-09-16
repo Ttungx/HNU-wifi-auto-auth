@@ -5,10 +5,18 @@
 使用 Windows 内置 schtasks 工具注册计划任务，无需 PowerShell，不受签名策略限制。
 """
 
+import ctypes
 import os
 import subprocess
 import sys
 import time
+
+
+def is_admin() -> bool:
+    try:
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
 
 
 def main():
@@ -16,6 +24,11 @@ def main():
     print("    校园网自动认证 (CampusWiFiAutoAuth) 安装程序")
     print("===================================================")
     print()
+
+    if not is_admin():
+        print("[-] 当前未以管理员身份运行，无法注册计划任务。")
+        print("    请右键 install_auto_auth.bat → 以管理员身份运行。")
+        sys.exit(1)
 
     work_dir = os.path.dirname(os.path.abspath(__file__))
 
@@ -28,7 +41,8 @@ def main():
     print(f"[*] 执行引擎: {pythonw}")
     print(f"[*] 脚本目录: {work_dir}")
 
-    # 2. 构造 Windows 任务计划标准 XML (包含 WLAN 连接 8001 事件及电池策略)
+    # 2. 构造 Windows 任务计划标准 XML
+    #    三重触发: Wi-Fi 连接事件 / 用户登录 / 每 2 分钟心跳 (兜底休眠唤醒等无事件场景)
     xml_content = f"""<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
@@ -40,16 +54,33 @@ def main():
     </Principal>
   </Principals>
   <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
     <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
     <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
-    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
-    <ExecutionTimeLimit>PT1M</ExecutionTimeLimit>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>3</Count>
+    </RestartOnFailure>
+    <ExecutionTimeLimit>PT5M</ExecutionTimeLimit>
   </Settings>
   <Triggers>
     <EventTrigger>
       <Enabled>true</Enabled>
       <Subscription>&lt;QueryList&gt;&lt;Query Id="0" Path="Microsoft-Windows-WLAN-AutoConfig/Operational"&gt;&lt;Select Path="Microsoft-Windows-WLAN-AutoConfig/Operational"&gt;*[System[(EventID=8001)]] and *[EventData[Data[@Name='SSID']='Htu-AuteWiFi' or Data[@Name='SSID']='autewifi' or Data[@Name='SSID']='AuteWiFi' or Data[@Name='SSID']='Htu-AuteWiFi5G-18' or Data[@Name='SSID']='Htu-AuteWiFi5G-17' or Data[@Name='SSID']='HTU_Student' or Data[@Name='SSID']='HTU_Teacher']]&lt;/Select&gt;&lt;/Query&gt;&lt;/QueryList&gt;</Subscription>
     </EventTrigger>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+      <Delay>PT20S</Delay>
+    </LogonTrigger>
+    <TimeTrigger>
+      <Enabled>true</Enabled>
+      <StartBoundary>2026-01-01T00:00:00</StartBoundary>
+      <Repetition>
+        <Interval>PT2M</Interval>
+        <StopAtDurationEnd>false</StopAtDurationEnd>
+      </Repetition>
+    </TimeTrigger>
   </Triggers>
   <Actions Context="Author">
     <Exec>
@@ -74,7 +105,8 @@ def main():
             sys.exit(1)
 
         print("[+] 成功创建系统计划任务: CampusWiFiAutoAuth")
-        print("[+] 电池策略已生效: 已解除电源限制，无论是否插电均可正常触发！")
+        print("[+] 触发策略: Wi-Fi 连接事件 / 用户登录后 20 秒 / 每 2 分钟心跳兜底")
+        print("[+] 失败自动重试: 1 分钟后最多重启 3 次; 电池策略已解除电源限制！")
 
         # 3. 自检测试运行
         print("[*] 正在执行任务自测...")
